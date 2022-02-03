@@ -94,6 +94,7 @@ def main(args):
     )
 
     loss_am = AverageMeter()
+    liveness_loss_am = AverageMeter()
     start_epoch = 0
     global_step = 0
     amp = torch.cuda.amp.grad_scaler.GradScaler(growth_interval=100)
@@ -102,19 +103,20 @@ def main(args):
 
         if isinstance(train_loader, DataLoader):
             train_loader.sampler.set_epoch(epoch)
-        for _, (img, local_labels) in enumerate(train_loader):
+        for _, (img, feature_labels, liveness_labels) in enumerate(train_loader):
             global_step += 1
-            local_embeddings = backbone(img)
-            loss: torch.Tensor = module_partial_fc(local_embeddings, local_labels, opt)
+            features_logits, liveness_logits = backbone(img)
+            feature_loss: torch.Tensor, liveness_loss: torch.Tensor = module_partial_fc(features_logits, feature_labels, liveness_logits, liveness_labels, opt)
+            total_loss = feature_loss + liveness_loss
 
             if cfg.fp16:
-                amp.scale(loss).backward()
+                amp.scale(total_loss).backward()
                 amp.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(backbone.parameters(), 5)
                 amp.step(opt)
                 amp.update()
             else:
-                loss.backward()
+                total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(backbone.parameters(), 5)
                 opt.step()
 
@@ -123,7 +125,8 @@ def main(args):
 
             with torch.no_grad():
                 loss_am.update(loss.item(), 1)
-                callback_logging(global_step, loss_am, epoch, cfg.fp16, lr_scheduler.get_last_lr()[0], amp)
+                liveness_loss_am.update(loss.item(), 1)
+                callback_logging(global_step, loss_am, liveness_loss_am, epoch, cfg.fp16, lr_scheduler.get_last_lr()[0], amp)
 
                 if global_step % cfg.verbose == 0 and global_step > 200:
                     callback_verification(global_step, backbone)

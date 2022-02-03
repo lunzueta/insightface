@@ -98,6 +98,8 @@ class IResNet(nn.Module):
         self.features = nn.BatchNorm1d(num_features, eps=1e-05)
         nn.init.constant_(self.features.weight, 1.0)
         self.features.weight.requires_grad = False
+        self.fc_prob = nn.Linear(512 * block.expansion *
+                                 self.fc_scale, 2)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -149,9 +151,10 @@ class IResNet(nn.Module):
             x = self.bn2(x)
             x = torch.flatten(x, 1)
             x = self.dropout(x)
-        x = self.fc(x.float() if self.fp16 else x)
-        x = self.features(x)
-        return x
+        feat_logits = self.fc(x.float() if self.fp16 else x)
+        feat_logits = self.features(feat_logits)
+        prob_logits = self.fc_prob(x.float() if self.fp16 else x)
+        return feat_logits, prob_logits
 
 
 def _iresnet(arch, block, layers, pretrained, progress, **kwargs):
