@@ -11,7 +11,7 @@ from dataset import get_dataloader
 from torch.utils.data import DataLoader
 from lr_scheduler import PolyScheduler
 from partial_fc import PartialFC
-from utils.utils_callbacks import CallBackLogging, CallBackVerification
+from utils.utils_callbacks import CallBackLogging, CallBackVerification, CallBackSpoofing
 from utils.utils_config import get_config
 from utils.utils_logging import AverageMeter, init_logging
 
@@ -86,6 +86,7 @@ def main(args):
     callback_verification = CallBackVerification(
         val_targets=cfg.val_targets, rec_prefix=cfg.rec, summary_writer=summary_writer
     )
+    callback_spoofing = CallBackSpoofing(2000, rank, cfg.rec)
     callback_logging = CallBackLogging(
         frequent=cfg.frequent,
         total_step=cfg.total_step,
@@ -99,6 +100,9 @@ def main(args):
     global_step = 0
     amp = torch.cuda.amp.grad_scaler.GradScaler(growth_interval=100)
 
+    ## liveness cross entropy
+    liveness_criterion = torch.nn.CrossEntropyLoss()
+
     for epoch in range(start_epoch, cfg.num_epoch):
 
         if isinstance(train_loader, DataLoader):
@@ -106,7 +110,9 @@ def main(args):
         for _, (img, feature_labels, liveness_labels) in enumerate(train_loader):
             global_step += 1
             features_logits, liveness_logits = backbone(img)
-            feature_loss: torch.Tensor, liveness_loss: torch.Tensor = module_partial_fc(features_logits, feature_labels, liveness_logits, liveness_labels, opt)
+            feature_loss = module_partial_fc(features_logits, feature_labels, liveness_logits, liveness_labels, opt)
+            # compute liveness loss
+            liveness_loss = liveness_criterion(liveness_logits, liveness_labels)
             total_loss = feature_loss + liveness_loss
 
             if cfg.fp16:
@@ -124,12 +130,13 @@ def main(args):
             lr_scheduler.step()
 
             with torch.no_grad():
-                loss_am.update(loss.item(), 1)
-                liveness_loss_am.update(loss.item(), 1)
+                loss_am.update(feature_loss.item(), 1)
+                liveness_loss_am.update(liveness_loss.item(), 1)
                 callback_logging(global_step, loss_am, liveness_loss_am, epoch, cfg.fp16, lr_scheduler.get_last_lr()[0], amp)
 
                 if global_step % cfg.verbose == 0 and global_step > 200:
                     callback_verification(global_step, backbone)
+                    callback_spoofing(global_step, backbone)
         
         path_pfc = os.path.join(cfg.output, "softmax_fc_gpu_{}.pt".format(rank))
         torch.save(module_partial_fc.state_dict(), path_pfc)

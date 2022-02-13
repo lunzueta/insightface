@@ -5,10 +5,12 @@ from typing import List
 
 import torch
 
-from eval import verification
+from eval import verification, spoofing_verification
 from utils.utils_logging import AverageMeter
 from torch.utils.tensorboard import SummaryWriter
 from torch import distributed
+import cv2
+import numpy as np
 
 
 class CallBackVerification(object):
@@ -72,6 +74,7 @@ class CallBackLogging(object):
     def __call__(self,
                  global_step: int,
                  loss: AverageMeter,
+                 liveness_loss: AverageMeter,
                  epoch: int,
                  fp16: bool,
                  learning_rate: float,
@@ -91,20 +94,76 @@ class CallBackLogging(object):
                     self.writer.add_scalar('time_for_end', time_for_end, global_step)
                     self.writer.add_scalar('learning_rate', learning_rate, global_step)
                     self.writer.add_scalar('loss', loss.avg, global_step)
+                    self.writer.add_scalar('liveness_loss', liveness_loss.avg, global_step)
                 if fp16:
-                    msg = "Speed %.2f samples/sec   Loss %.4f   LearningRate %.4f   Epoch: %d   Global Step: %d   " \
+                    msg = "Speed %.2f samples/sec   Loss %.4f   Liveness loss %.4f   LearningRate %.4f   Epoch: %d   Global Step: %d   " \
                           "Fp16 Grad Scale: %2.f   Required: %1.f hours" % (
-                              speed_total, loss.avg, learning_rate, epoch, global_step,
+                              speed_total, loss.avg, liveness_loss.avg, learning_rate, epoch, global_step,
                               grad_scaler.get_scale(), time_for_end
                           )
                 else:
-                    msg = "Speed %.2f samples/sec   Loss %.4f   LearningRate %.4f   Epoch: %d   Global Step: %d   " \
+                    msg = "Speed %.2f samples/sec   Loss %.4f   Liveness loss %.4f   LearningRate %.4f   Epoch: %d   Global Step: %d   " \
                           "Required: %1.f hours" % (
-                              speed_total, loss.avg, learning_rate, epoch, global_step, time_for_end
+                              speed_total, loss.avg, liveness_loss.avg, learning_rate, epoch, global_step, time_for_end
                           )
                 logging.info(msg)
                 loss.reset()
+                liveness_loss.reset()
                 self.tic = time.time()
             else:
                 self.init = True
                 self.tic = time.time()
+
+class CallBackSpoofing(object):
+    def __init__(self, rec_prefix, image_size=(112, 112)):
+        self.rank: int = distributed.get_rank()
+        self.highest_acc: float = 0.0
+        if self.rank == 0:
+            self.init_dataset(data_dir=rec_prefix, image_size=image_size)
+
+    def ver_test(self, backbone: torch.nn.Module, global_step: int):
+        acc = spoofing_verification.test(
+            self.dataset, backbone, 10)
+        logging.info('[CelebA_Spoof][%d] Spoofing accuracy: %1.5f' % (global_step, acc))
+        if acc > self.highest_acc:
+            self.highest_acc = acc
+        logging.info(
+            '[CelebA_Spoof][%d]Accuracy-Highest: %1.5f' % (global_step, self.highest_acc))
+
+    def init_dataset(self, data_dir, image_size):
+        images = []
+        liveness_labels = []
+        test_dir = os.path.join(data_dir, 'Norm_data/test')
+        for subdir in os.listdir(test_dir):
+            live_dir = os.path.join(test_dir, subdir, 'live')
+            if os.path.isdir(live_dir):
+                liveness_label = 1
+                for file_name in os.listdir(live_dir):
+                    if '.jpg' in file_name or '.png' in file_name:
+                        file_path = os.path.join(live_dir,file_name)
+                        im = cv2.imread(file_path)
+                        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+                        im = np.transpose(im, axes=(2, 0, 1))
+                        im_tensor = torch.from_numpy(im)
+                        images.append(im_tensor)
+                        liveness_labels.append(liveness_label)
+            spoof_dir = os.path.join(test_dir, subdir, 'spoof')
+            if os.path.isdir(spoof_dir):
+                liveness_label = 0
+                for file_name in os.listdir(spoof_dir):
+                    if '.jpg' in file_name or '.png' in file_name:
+                        file_path = os.path.join(spoof_dir,file_name)
+                        im = cv2.imread(file_path)
+                        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+                        im = np.transpose(im, axes=(2, 0, 1))
+                        im_tensor = torch.from_numpy(im).float()
+                        images.append(im_tensor)
+                        liveness_labels.append(liveness_label)
+        images = torch.stack(images, dim=0)
+        self.dataset = [images, liveness_labels]
+
+    def __call__(self, num_update, backbone: torch.nn.Module):
+        if self.rank is 0 and num_update > 0:
+            backbone.eval()
+            self.ver_test(backbone, num_update)
+            backbone.train()

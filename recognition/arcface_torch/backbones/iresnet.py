@@ -153,8 +153,8 @@ class IResNet(nn.Module):
             x = self.dropout(x)
         feat_logits = self.fc(x.float() if self.fp16 else x)
         feat_logits = self.features(feat_logits)
-        prob_logits = self.fc_prob(x.float() if self.fp16 else x)
-        return feat_logits, prob_logits
+        spoof_logits = self.fc_prob(x.float() if self.fp16 else x)
+        return feat_logits, spoof_logits
 
 
 def _iresnet(arch, block, layers, pretrained, progress, **kwargs):

@@ -26,7 +26,8 @@ def get_dataloader(
         if root_dir == "synthetic":
             train_set = SyntheticDataset()
         else:
-            train_set = MXFaceDataset(root_dir=root_dir, local_rank=local_rank)
+            # train_set = MXFaceDataset(root_dir=root_dir, local_rank=local_rank)
+            train_set = SpoofingFaceDataset(root_dir=root_dir, local_rank=local_rank)
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_set, shuffle=True)
         train_loader = DataLoaderX(
             local_rank=local_rank,
@@ -134,6 +135,66 @@ class MXFaceDataset(Dataset):
 
     def __len__(self):
         return len(self.imgidx)
+
+
+class SpoofingFaceDataset(Dataset):
+    def __init__(self, root_dir, local_rank):
+        super(SpoofingFaceDataset, self).__init__()
+        self.transform = transforms.Compose(
+            [transforms.ToPILImage(),
+             transforms.RandomHorizontalFlip(),
+             transforms.ToTensor(),
+             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+             ])
+        self.local_rank = local_rank
+        self.images = []
+        self.labels = []
+        self.liveness_labels = []
+        subdir_list = []
+        train_dir = os.path.join(root_dir, 'Norm_data/train')
+        for subdir in os.listdir(train_dir):
+            subdir_list.append(subdir)
+        subdir_list.sort()
+        for label, subdir in enumerate(subdir_list):
+            live_dir = os.path.join(train_dir, subdir, 'live')
+            if os.path.isdir(live_dir):
+                liveness_label = 1
+                for file_name in os.listdir(live_dir):
+                    if '.jpg' in file_name or '.png' in file_name:
+                        file_path = os.path.join(live_dir,file_name)
+                        # im = Image.open(file_path)
+                        im = cv2.imread(file_path)
+                        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+                        self.images.append(im)
+                        self.labels.append(label)
+                        self.liveness_labels.append(liveness_label)
+            spoof_dir = os.path.join(train_dir, subdir, 'spoof')
+            if os.path.isdir(spoof_dir):
+                liveness_label = 0
+                for file_name in os.listdir(spoof_dir):
+                    if '.jpg' in file_name or '.png' in file_name:
+                        file_path = os.path.join(spoof_dir,file_name)
+                        # im = Image.open(file_path)
+                        im = cv2.imread(file_path)
+                        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+                        self.images.append(im)
+                        self.labels.append(label)
+                        self.liveness_labels.append(liveness_label)
+        print('Number of images loaded:', len(self.images))
+
+    def __getitem__(self, index):
+        sample = self.images[index]
+        label = self.labels[index]
+        liveness_label = self.liveness_labels[index]
+        label = torch.tensor(label, dtype=torch.long)
+        liveness_label = torch.tensor(liveness_label, dtype=torch.long)
+
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample, label, liveness_label
+
+    def __len__(self):
+        return len(self.images)
 
 
 class SyntheticDataset(Dataset):
